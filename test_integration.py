@@ -42,7 +42,8 @@ def main():
     print(f'  Gini_initial = {config.scalar_params.Gini_initial}')
     print(f'  fract_gdp = {config.scalar_params.fract_gdp}')
     print(f'\nTime-Dependent Parameters (at t=0):')
-    print(f'  s(0) = {config.time_functions["s"](0.0)}')
+    f_0, s_0 = config.control_function(0.0)
+    print(f'  s(0) = {s_0}')
 
     # Run integration
     print(f'\nRunning integration...')
