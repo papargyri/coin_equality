@@ -2,7 +2,7 @@ import openpyxl
 import json
 
 # Load the Excel file
-wb = openpyxl.load_workbook('/Users/lamprinipapargyri/Code/coin_equality/1_time_step_calc/COIN_equality_v1.xlsm', data_only=True)
+wb = openpyxl.load_workbook('/Users/lamprinipapargyri/Code/coin_equality/1_time_step_calc/COIN_equality_v1.xlsx', data_only=True)
 
 # Read Config sheet
 print("="*80)
