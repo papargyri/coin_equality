@@ -21,6 +21,7 @@ VARIABLE_METADATA = {
     'E': {'description': 'Actual Emissions', 'units': 'tCO₂/yr', 'group': 'climate'},
     'Ecum': {'description': 'Cumulative Emissions', 'units': 'tCO₂', 'group': 'climate'},
     'G_eff': {'description': 'Effective Gini Index', 'units': '', 'group': 'inequality'},
+    'Gini_climate': {'description': 'Post-Climate-Damage Gini', 'units': '', 'group': 'inequality'},
     'K': {'description': 'Capital Stock', 'units': '$', 'group': 'economic'},
     'L': {'description': 'Population', 'units': 'people', 'group': 'economic'},
     'Lambda': {'description': 'Abatement Cost Fraction', 'units': '', 'group': 'abatement'},
@@ -29,11 +30,11 @@ VARIABLE_METADATA = {
     'Y_damaged': {'description': 'GDP After Climate Damage', 'units': '$', 'group': 'economic'},
     'Y_gross': {'description': 'Gross GDP', 'units': '$', 'group': 'economic'},
     'Y_net': {'description': 'Net GDP', 'units': '$', 'group': 'economic'},
-    'abatecost': {'description': 'Abatement Expenditure', 'units': '$', 'group': 'abatement'},
+    'AbateCost': {'description': 'Abatement Expenditure', 'units': '$', 'group': 'abatement'},
     'dEcum_dt': {'description': 'Emissions Rate', 'units': 'tCO₂/yr', 'group': 'climate'},
     'dK_dt': {'description': 'Capital Growth Rate', 'units': '$/yr', 'group': 'economic'},
     'delta_T': {'description': 'Temperature Change', 'units': '°C', 'group': 'climate'},
-    'delta_c': {'description': 'Per-Capita Redistributable Income', 'units': '$/person', 'group': 'inequality'},
+    'redistribution': {'description': 'Per-Capita Redistributable Income', 'units': '$/person', 'group': 'inequality'},
     'f': {'description': 'Abatement Allocation Fraction', 'units': '', 'group': 'policy'},
     'mu': {'description': 'Emissions Abatement Fraction', 'units': '', 'group': 'abatement'},
     'sigma': {'description': 'Carbon Intensity of GDP', 'units': 'tCO₂/$', 'group': 'climate'},
@@ -50,16 +51,16 @@ VARIABLE_GROUPS = {
         {'type': 'combined', 'title': 'Control Variables', 'variables': ['f', 's'], 'units': 'fraction'},
         {'type': 'single', 'variables': ['mu']},
         {'type': 'combined', 'title': 'Economic Impact Fractions', 'variables': ['Omega', 'Lambda'], 'units': 'fraction'},
-        {'type': 'single', 'variables': ['G_eff']},
+        {'type': 'combined', 'title': 'Inequality Measures', 'variables': ['Gini', 'Gini_climate', 'G_eff'], 'units': ''},
         {'type': 'single', 'variables': ['U']}
     ],
     'dollar_variables': [
         {'type': 'combined', 'title': 'GDP Components', 'variables': ['Y_gross', 'Y_damaged', 'Y_net'], 'units': '$'},
         {'type': 'single', 'variables': ['K']},
-        {'type': 'single', 'variables': ['abatecost']},
+        {'type': 'single', 'variables': ['AbateCost']},
         {'type': 'single', 'variables': ['dK_dt']},
         {'type': 'combined', 'title': 'Per-Capita Income', 'variables': ['y', 'y_eff'], 'units': '$/person'},
-        {'type': 'single', 'variables': ['delta_c']}
+        {'type': 'single', 'variables': ['redistribution']}
     ],
     'physical_variables': [
         {'type': 'combined', 'title': 'Emissions', 'variables': ['E', 'dEcum_dt'], 'units': 'tCO₂/yr'},
@@ -327,22 +328,21 @@ def write_results_csv(results, output_dir, filename='results.csv'):
         'delta_T',  # Global mean temperature change
         # Production chain
         'Y_gross',  # Gross production before climate damage
-        'total_climate_damage',  # Total climate damage (Y_gross * Omega)
+        'Climate_Damage',  # Total climate damage (Y_gross * Omega)
         'Y_damaged',  # Output after climate damage before abatement
         # Costs and net
-        'abatecost',  # Total abatement expenditure
+        'AbateCost',  # Total abatement expenditure
         'Y_net',  # Output net of climate damage and abatement cost
-        # Investment and consumption
-        'gross_investment',  # Gross investment
-        'consumption',  # Total consumption
+        # Investment and Consumption
+        'Savings',  # Gross investment
+        'Consumption',  # Total Consumption
         # Per capita indices
         'y_eff',  # Effective per-capita income after abatement
-        'delta_c',  # Per-capita redistributable income
+        'redistribution',  # Per-capita redistributable income
         'U',  # Mean utility per capita
         'discounted_utility',  # Discounted utility per capita
         # Dimensionless variables
         'Omega',  # Climate damage as fraction of gross output
-        'abatement_cost_fraction',  # Abatement cost as fraction of after-damage income
         'Lambda',  # Abatement cost as fraction of damaged output
         'Gini_climate',  # Gini index after climate damage before redistribution
         'G_eff',  # Gini index after redistribution
@@ -350,7 +350,7 @@ def write_results_csv(results, output_dir, filename='results.csv'):
         'mu',  # Abatement fraction
         'E',  # CO2 emissions
         'dK_dt',  # Net capital accumulation
-        'y',  # Per-capita consumption (before abatement)
+        'y',  # Per-capita Consumption (before abatement)
         'dGini_dt',  # Continuous Gini change rate
         'Gini_step_change',  # Discontinuous Gini step change
         'marginal_abatement_cost',  # Marginal abatement cost (social cost of carbon)
@@ -371,17 +371,16 @@ def write_results_csv(results, output_dir, filename='results.csv'):
         'Ecum': ('Cumulative CO2 emissions', 'tCO2'),
         'delta_T': ('Global mean temperature change', '°C'),
         'Omega': ('Climate damage as fraction of gross output', 'dimensionless'),
-        'total_climate_damage': ('Total climate damage', '$/yr'),
+        'Climate_Damage': ('Total climate damage', '$/yr'),
         'Y_damaged': ('Output after climate damage before abatement', '$/yr'),
-        'abatement_cost_fraction': ('Abatement cost as fraction of after-damage income', 'dimensionless'),
-        'abatecost': ('Total abatement expenditure', '$/yr'),
+        'AbateCost': ('Total abatement expenditure', '$/yr'),
         'Y_net': ('Output net of climate damage and abatement cost', '$/yr'),
         'E': ('CO2 emissions', 'tCO2/yr'),
-        'gross_investment': ('Gross investment', '$/yr'),
+        'Savings': ('Gross investment', '$/yr'),
         'K': ('Capital stock', '$'),
-        'consumption': ('Total consumption', '$/yr'),
+        'Consumption': ('Total Consumption', '$/yr'),
         'dK_dt': ('Net capital accumulation', '$/yr'),
-        'y': ('Per-capita consumption', '$/person/yr'),
+        'y': ('Per-capita Consumption', '$/person/yr'),
         'Gini': ('Gini index before redistribution', 'dimensionless'),
         'G_eff': ('Gini index after redistribution', 'dimensionless'),
         'dGini_dt': ('Continuous Gini change rate', '1/yr'),
@@ -395,7 +394,7 @@ def write_results_csv(results, output_dir, filename='results.csv'):
         'Gini_climate': ('Gini index after climate damage before redistribution', 'dimensionless'),
         'y_eff': ('Effective per-capita income after abatement', '$/person/yr'),
         'Lambda': ('Abatement cost as fraction of damaged output', 'dimensionless'),
-        'delta_c': ('Per-capita redistributable income', '$/person/yr'),
+        'redistribution': ('Per-capita redistributable income', '$/person/yr'),
         'dEcum_dt': ('Rate of cumulative emissions change', 'tCO2/yr'),
     }
 
@@ -631,7 +630,7 @@ def _create_plot_page_new(t, results, chart_specs, group_name, run_name, pdf, pa
     plt.close(fig)
 
 
-def save_results(results, run_name, plot_short_horizon=None):
+def save_results(results, run_name, plot_short_horizon=None, output_dir=None):
     """
     Save model results to CSV and PDF in timestamped directory.
 
@@ -645,6 +644,8 @@ def save_results(results, run_name, plot_short_horizon=None):
         If provided, creates a second PDF with results up to this time (years).
         Creates both plots_full.pdf and plots_short.pdf.
         If None, creates single plots.pdf with all results.
+    output_dir : str or None
+        If provided, uses this directory for output. If None, creates new timestamped directory.
 
     Returns
     -------
@@ -657,13 +658,14 @@ def save_results(results, run_name, plot_short_horizon=None):
 
     Notes
     -----
-    Creates directory: ./data/output/{run_name}_YYYYMMDD-HHMMSS
+    Creates directory: ./data/output/{run_name}_YYYYMMDD-HHMMSS (if output_dir not provided)
     Writes files:
     - results.csv: all variables in tabular format
     - plots_full.pdf: time series plots for entire integration period
     - plots_short.pdf: time series plots for short horizon (if plot_short_horizon provided)
     """
-    output_dir = create_output_directory(run_name)
+    if output_dir is None:
+        output_dir = create_output_directory(run_name)
     csv_file = write_results_csv(results, output_dir)
 
     output_dict = {

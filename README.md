@@ -27,10 +27,13 @@ A simple-as-possible stylized representation of the tradeoff between investment 
 - [Unit Testing: Validating Analytical Solutions](#unit-testing-validating-analytical-solutions)
   - [Unit Test for Equation (1.2): Climate Damage](#unit-test-for-equation-12-climate-damage)
   - [Testing the Forward Model](#testing-the-forward-model)
-  - [Testing the Optimization with Parameter Overrides](#testing-the-optimization-with-parameter-overrides)
+  - [Running Optimizations with Parameter Overrides](#running-optimizations-with-parameter-overrides)
+  - [Running Multiple Optimizations in Parallel](#running-multiple-optimizations-in-parallel)
+  - [Comparing Multiple Optimization Results](#comparing-multiple-optimization-results)
 - [Time Integration](#time-integration)
   - [Integration Function](#integration-function)
   - [Implementation Notes](#implementation-notes)
+  - [Performance Optimizations](#performance-optimizations)
   - [Output Variables](#output-variables)
 - [Output and Visualization](#output-and-visualization)
   - [Saving Results](#saving-results)
@@ -85,11 +88,11 @@ For the differential equation solver, variables are calculated in this order:
 6. **y** from Y_damaged, L, s (Eq 1.4: mean per-capita income after climate damage)
 7. **c_redist** from y, f_gdp (Eq 4.3: per-capita amount redistributable)
 8. **E_pot** from σ, Y_gross (Eq 2.1: potential emissions)
-9. **abatecost** from f, c_redist, L (Eq 1.5: abatement expenditure)
-10. **μ** from abatecost, θ₁, θ₂, E_pot (Eq 1.6: fraction of emissions abated, capped at μ_max)
-11. **Λ** from abatecost, Y_damaged (Eq 1.7: abatement cost fraction)
+9. **AbateCost** from f, c_redist, L (Eq 1.5: abatement expenditure)
+10. **μ** from AbateCost, θ₁, θ₂, E_pot (Eq 1.6: fraction of emissions abated, capped at μ_max)
+11. **Λ** from AbateCost, Y_damaged (Eq 1.7: abatement cost fraction)
 12. **Y_net** from Y_damaged, Λ (Eq 1.8: production after abatement costs)
-13. **y_eff** from y, abatecost, L (Eq 1.9: effective per-capita income)
+13. **y_eff** from y, AbateCost, L (Eq 1.9: effective per-capita income)
 14. **G_eff** from f, f_gdp, G_climate (Eq 4.4: effective Gini after redistribution/abatement; when f_gdp >= 1, G_eff = G_climate with no redistribution effect)
 15. **U** from y_eff, G_eff, η (Eq 3.5: mean utility)
 16. **E** from σ, μ, Y_gross (Eq 2.3: actual emissions after abatement)
@@ -155,7 +158,7 @@ G_climate = 1 - (1 - G₀) · (1 - ω_max · H) / (1 - ω_mean)
 - As `ΔT → 0`: `ω_max → 0` and `Ω → 0` (no damage)
 
 **Implementation:**
-All integrals are solved analytically using closed-form solutions based on hypergeometric functions. This avoids numerical integration and is exact within numerical precision. See `climate_damage_distribution.py` for complete derivations and implementation.
+All integrals are solved analytically using closed-form solutions based on the Gauss hypergeometric function (₂F₁) from `scipy.special.hyp2f1`. This avoids numerical integration and is exact within numerical precision (~1e-16). The scipy implementation provides 200x+ speedup compared to arbitrary-precision libraries while maintaining excellent accuracy for this application. See `climate_damage_distribution.py` for complete derivations and implementation.
 
 **Eq. (1.3) - Damaged Production:**
 ```
@@ -170,7 +173,7 @@ y(t) = (1 - s) · Y_damaged(t) / L(t)
 
 **Eq. (1.5) - Abatement Cost:**
 ```
-abatecost(t) = f · c_redist(t) · L(t)
+AbateCost(t) = f · c_redist(t) · L(t)
 ```
 This is the total amount society allocates to emissions abatement, where:
 - `f` = fraction of redistributable resources allocated to abatement (0 ≤ f ≤ 1)
@@ -179,7 +182,7 @@ This is the total amount society allocates to emissions abatement, where:
 
 **Eq. (1.6) - Abatement Fraction:**
 ```
-μ(t) = min(μ_max, [abatecost(t) · θ₂ / (E_pot(t) · θ₁(t))]^(1/θ₂))
+μ(t) = min(μ_max, [AbateCost(t) · θ₂ / (E_pot(t) · θ₁(t))]^(1/θ₂))
 ```
 The fraction of potential emissions that are abated, where:
 - `E_pot(t) = σ(t) · Y_gross(t)` = potential (unabated) emissions
@@ -193,7 +196,7 @@ This formulation differs from Nordhaus in that reducing carbon intensity σ(t) r
 
 **Eq. (1.7) - Abatement Cost Fraction:**
 ```
-Λ(t) = abatecost(t) / Y_damaged(t)
+Λ(t) = AbateCost(t) / Y_damaged(t)
 ```
 This represents the fraction of damaged production allocated to emissions abatement.
 
@@ -205,7 +208,7 @@ Production after both climate damage and abatement costs.
 
 **Eq. (1.9) - Effective Per-Capita Income:**
 ```
-y_eff(t) = y(t) - abatecost(t) / L(t)
+y_eff(t) = y(t) - AbateCost(t) / L(t)
 ```
 This is the per-capita income after subtracting abatement costs, used for utility calculations.
 
@@ -342,18 +345,18 @@ When `f_gdp >= 1`, the model disables redistribution and enables pure abatement 
    - Falls back to simple uniform damage rather than attempting income-dependent calculation
 
 3. **Abatement Budget Mechanics**:
-   - Available budget: `delta_c = y * delta_L` (Line 136 of `economic_model.py`)
-   - With `delta_L >= 1`, this creates `delta_c >= y` (budget at least equals full per-capita income)
-   - Abatement expenditure: `abatecost = f * delta_c * L` (Line 142)
-   - Effective income: `y_eff = y - abatecost/L = y - f * delta_c`
+   - Available budget: `redistribution = y * delta_L` (Line 136 of `economic_model.py`)
+   - With `delta_L >= 1`, this creates `redistribution >= y` (budget at least equals full per-capita income)
+   - Abatement expenditure: `AbateCost = f * redistribution * L` (Line 142)
+   - Effective income: `y_eff = y - AbateCost/L = y - f * redistribution`
 
 4. **Optimizer Behavior**:
    - The optimizer chooses `f` to maximize utility over time
    - **Naturally selects `f << 1`** because:
-     - Large `f` would make `y_eff = y - f * delta_c` very small or negative
-     - This would result in terrible current utility (consumption crash)
-     - Optimizer balances current consumption vs. future climate benefits
-   - **Equivalence**: Optimization of `f` becomes equivalent to optimizing the abatement/consumption tradeoff
+     - Large `f` would make `y_eff = y - f * redistribution` very small or negative
+     - This would result in terrible current utility (Consumption crash)
+     - Optimizer balances current Consumption vs. future climate benefits
+   - **Equivalence**: Optimization of `f` becomes equivalent to optimizing the abatement/Consumption tradeoff
    - No redistribution component in utility calculation (since `G_eff = Gini_climate`)
 
 5. **Physical Interpretation**:
@@ -493,11 +496,11 @@ The model supports two control variables that can be optimized:
 
 **f(t) - Abatement Allocation:** Determines the allocation between emissions abatement and income redistribution (0 = all to redistribution, 1 = all to abatement). Always specified via `control_function` in the configuration.
 
-**s(t) - Savings Rate:** Determines the fraction of net output allocated to investment vs. consumption. Can be specified in two ways:
+**s(t) - Savings Rate:** Determines the fraction of net output allocated to investment vs. Consumption. Can be specified in two ways:
 - **Fixed/Prescribed s(t):** Defined in `time_functions['s']` using any time function type (constant, piecewise_linear, etc.)
 - **Optimized s(t):** Defined in `s_control_function` to enable dual optimization of both f(t) and s(t)
 
-When both `control_function` and `s_control_function` are present, the model operates in **dual optimization mode**, allowing simultaneous optimization of the abatement-redistribution tradeoff and the consumption-investment tradeoff.
+When both `control_function` and `s_control_function` are present, the model operates in **dual optimization mode**, allowing simultaneous optimization of the abatement-redistribution tradeoff and the Consumption-investment tradeoff.
 
 ### Integration Parameters
 
@@ -827,9 +830,10 @@ Maximum relative error: 4.56e-11
 
 **Technical details:**
 
-- Uses `mpmath` library for arbitrary-precision arithmetic (80 decimal places)
-- Numerical integration performed with `mpmath.quad()` adaptive quadrature
-- Tests both the aggregate damage (Ω) and implicitly validates the underlying income distribution formulas
+- Production code uses `scipy.special.hyp2f1` for optimal performance (200x+ faster than arbitrary-precision alternatives)
+- Unit tests use `mpmath` library for arbitrary-precision arithmetic (80 decimal places) to validate accuracy
+- Numerical integration in tests performed with `mpmath.quad()` adaptive quadrature
+- Tests validate both the aggregate damage (Ω) and implicitly the underlying income distribution formulas
 - Random seed fixed for reproducibility
 
 **Purpose:**
@@ -897,8 +901,9 @@ The test script provides detailed console output including:
 Each test run creates a timestamped directory:
 ```
 ./data/output/{run_name}_YYYYMMDD-HHMMSS/
-├── results.csv    # Complete time series data (all variables)
-└── plots.pdf      # Multi-page charts organized by variable type
+├── results.csv          # Complete time series data (all variables)
+├── plots.pdf            # Multi-page charts organized by variable type
+└── terminal_output.txt  # Console output from the run
 ```
 
 The PDF contains four organized sections:
@@ -922,32 +927,32 @@ python test_integration.py config_my_test.json
 
 This testing framework validates the complete model pipeline and provides immediate visual feedback on model behavior through the generated charts.
 
-### Testing the Optimization with Parameter Overrides
+### Running Optimizations with Parameter Overrides
 
-The optimization test script supports command line parameter overrides, enabling automated parameter sweeps without creating multiple configuration files.
+The optimization script supports command line parameter overrides, enabling automated parameter sweeps without creating multiple configuration files.
 
 #### Command Line Override Syntax
 
 Override any configuration parameter using dot notation:
 
 ```bash
-python test_optimization.py config.json --key.subkey.value new_value
+python run_optimization.py config.json --key.subkey.value new_value
 ```
 
 **Examples:**
 
 ```bash
 # Override single parameter
-python test_optimization.py config_baseline.json --scalar_parameters.alpha 0.35
+python run_optimization.py config_baseline.json --scalar_parameters.alpha 0.35
 
 # Override multiple parameters
-python test_optimization.py config_baseline.json \
+python run_optimization.py config_baseline.json \
   --run_name "sensitivity_test" \
   --optimization_parameters.initial_guess 0.3 \
   --scalar_parameters.rho 0.015
 
 # Override nested parameters
-python test_optimization.py config_baseline.json \
+python run_optimization.py config_baseline.json \
   --time_functions.A.growth_rate 0.02 \
   --optimization_parameters.n_points_final 100
 ```
@@ -982,7 +987,7 @@ config_file = "config_baseline.json"
 # Sweep over alpha values
 for alpha in [0.25, 0.30, 0.35, 0.40]:
     cmd = [
-        "python", "test_optimization.py", config_file,
+        "python", "run_optimization.py", config_file,
         "--scalar_parameters.alpha", str(alpha),
         "--run_name", f"alpha_{alpha:.2f}"
     ]
@@ -995,6 +1000,210 @@ for alpha in [0.25, 0.30, 0.35, 0.40]:
 - Git-friendly: only baseline configs need version control
 - Clear provenance: command documents what changed from baseline
 - Composable: combine multiple overrides in one command
+
+### Running Multiple Optimizations in Parallel
+
+The `run_parallel.py` script enables launching multiple optimization jobs simultaneously, with each job running on its own CPU core. This is ideal for parameter sweeps or running multiple scenarios.
+
+#### Parallel Execution
+
+The script accepts file patterns (with wildcards) for JSON configuration files, plus optional parameter overrides:
+
+```bash
+python run_parallel.py <pattern1> [pattern2] [...] [--key value] [...]
+```
+
+**Examples:**
+
+```bash
+# Run all COIN equality configs in parallel
+python run_parallel.py "config_COIN-equality_000*.json"
+
+# Run specific configuration files
+python run_parallel.py config_baseline.json config_sensitivity.json
+
+# Run multiple patterns
+python run_parallel.py "config_COIN*.json" "config_DICE*.json"
+
+# Quick test with reduced evaluations (applied to all jobs)
+python run_parallel.py "config_*.json" --optimization_params.max_evaluations 100
+
+# Override multiple parameters
+python run_parallel.py "config_*.json" --optimization_params.max_evaluations 100 --run_name quick_test
+```
+
+#### How It Works
+
+- **Parallel execution**: All matching JSON files are launched simultaneously as separate Python processes
+- **Independent cores**: Each optimization runs on its own CPU core
+- **Parameter overrides**: Optional `--key value` pairs are applied to ALL jobs (useful for quick tests)
+- **Terminal output**: Automatically saved to `terminal_output.txt` in each job's output directory
+- **Non-blocking**: The script exits immediately after launching all jobs (does not wait for completion)
+
+#### Monitoring and Controlling Jobs
+
+The output directory and `terminal_output.txt` file are created at the start of each optimization run, allowing you to monitor progress in real-time:
+
+```bash
+# Find the most recent output directory for a run
+ls -lt data/output/<run_name>_* | head -1
+
+# Monitor progress in real-time (updates automatically)
+tail -f data/output/<run_name>_YYYYMMDD-HHMMSS/terminal_output.txt
+
+# View current progress
+cat data/output/<run_name>_YYYYMMDD-HHMMSS/terminal_output.txt
+
+# View running processes
+ps aux | grep run_optimization
+```
+
+**Stopping jobs:**
+
+```bash
+# Kill a specific job by PID
+kill <PID>
+
+# Kill ALL run_optimization.py jobs at once
+pkill -f run_optimization.py
+```
+
+Process IDs (PIDs) are displayed when jobs are launched. The terminal output file updates continuously as the optimization progresses, allowing you to track:
+- Configuration loading and setup
+- Optimization iterations and progress
+- Function evaluations and objective values
+- Final results and file generation
+
+**Note:** The `pkill` command will terminate all running `run_optimization.py` processes, which is useful for stopping an entire parameter sweep but should be used with caution if you have multiple independent jobs running.
+
+#### Typical Workflow
+
+```bash
+# 1. Quick test with reduced evaluations
+python run_parallel.py "config_sensitivity_*.json" --optimization_params.max_evaluations 100
+
+# 2. Monitor progress
+watch -n 10 'ps aux | grep run_optimization | wc -l'
+
+# 3. After test completes, run full optimization
+python run_parallel.py "config_sensitivity_*.json"
+
+# 4. After jobs complete, compare results
+python compare_results.py "data/output/sensitivity_*/"
+```
+
+**Benefits:**
+- Fully utilizes multi-core systems
+- No need to wait for sequential completion
+- Terminal output saved for each job
+- Parameter overrides for quick testing
+- Simple command-line interface
+
+### Comparing Multiple Optimization Results
+
+After running multiple optimizations (e.g., parameter sweeps or scenario comparisons), use the comparison tool to analyze and visualize differences across runs.
+
+#### Running Comparisons
+
+The `compare_results.py` script accepts unlimited directory paths with wildcard support:
+
+```bash
+python compare_results.py <path1> [path2] [path3] [...]
+```
+
+**Examples:**
+
+```bash
+# Compare all runs matching a pattern
+python compare_results.py "data/output/test_*/"
+
+# Compare specific directories
+python compare_results.py data/output/baseline/ data/output/high_eta/
+
+# Compare multiple patterns
+python compare_results.py "data/output/alpha_*/" "data/output/rho_*/"
+```
+
+#### Comparison Outputs
+
+The tool creates a timestamped directory `data/output/comparison_YYYYMMDD-HHMMSS/` containing three files:
+
+1. **`optimization_comparison_summary.xlsx`** - Excel workbook with optimization metrics:
+   - Sheet 1: "Directories" - list of all compared directories with case names
+   - Sheet 2: "Objective" - objective values by iteration for each case
+   - Sheet 3: "Evaluations" - function evaluation counts
+   - Sheet 4: "Elapsed Time (s)" - computation time (if available)
+   - Sheet 5: "Termination Status" - optimization termination reasons
+   - Sheets 6+: "Iter N f(t)" - f control points for each iteration
+     - Shows optimal f(t) trajectory (abatement allocation) at each iteration
+     - Time in column A, f values for each case in subsequent columns
+     - Allows comparing how the optimal control evolved across iterations
+   - Additional sheets: "Iter N s(t)" - s control points (for dual optimization cases)
+     - Shows optimal s(t) trajectory (savings rate) at each iteration
+     - Only included if any case optimizes both f and s
+   - Cases appear as columns, iterations as rows
+
+2. **`results_comparison_summary.xlsx`** - Excel workbook with time series results:
+   - Sheet 1: "Directories" - list of all compared directories
+   - Sheets 2-28: One sheet per variable (27 model variables)
+   - Each sheet has time in column A, one column per case for that variable
+   - Variables match plots in PDF: economic, climate, abatement, inequality, and utility metrics
+   - Includes Gini_climate: post-climate-damage inequality (before redistribution)
+   - Includes marginal_abatement_cost: actual marginal cost at current mu, and theta1: marginal cost at mu=1
+
+3. **`comparison_plots.pdf`** - PDF report with visualizations:
+   - Page 1: Summary scatter plots (objective, time, evaluations)
+   - Pages 2+: Time series overlays for all model variables (27 variables)
+   - 16:9 landscape format optimized for screen viewing
+   - Multi-line plots show different cases in different colors
+   - For multi-case comparisons: unified legend in top-left position of each page (5 plots per page)
+   - For single-case: 6 plots per page without legend
+
+#### What Gets Compared
+
+The tool compares data from two sources:
+
+1. **`optimization_summary.csv`** - Optimization performance metrics:
+   - Required in each result directory
+   - Contains iteration-by-iteration optimization statistics
+
+2. **`results.csv`** - Full model time series (optional):
+   - If present, adds detailed time series comparisons to PDF
+   - Includes all 27 model variables (economic, climate, inequality, etc.)
+   - If missing, only optimization summary is compared
+
+#### Example Workflow
+
+**Sequential execution:**
+```bash
+# Run parameter sweep one at a time
+python run_optimization.py config_baseline.json --scalar_parameters.eta 0.5 --run_name eta_0.5
+python run_optimization.py config_baseline.json --scalar_parameters.eta 1.0 --run_name eta_1.0
+python run_optimization.py config_baseline.json --scalar_parameters.eta 1.5 --run_name eta_1.5
+
+# Compare results (creates data/output/comparison_YYYYMMDD-HHMMSS/)
+python compare_results.py "data/output/eta_*/"
+```
+
+**Parallel execution (faster):**
+```bash
+# Create config files for parameter sweep
+# (or use run_parallel.py with existing configs)
+
+# Run all optimizations in parallel
+python run_parallel.py "config_eta_*.json"
+
+# After jobs complete, compare results
+python compare_results.py "data/output/eta_*/"
+
+# View outputs (use actual timestamp from comparison output)
+cd data/output/comparison_YYYYMMDD-HHMMSS/
+open optimization_comparison_summary.xlsx
+open results_comparison_summary.xlsx
+open comparison_plots.pdf
+```
+
+This workflow enables systematic comparison of how model results depend on parameter choices, facilitating sensitivity analysis and scenario comparison.
 
 ## Time Integration
 
@@ -1033,6 +1242,54 @@ This ensures:
 
 The clamp is applied during integration rather than modifying E itself, allowing the emissions rate to reflect the model's physical calculations while preventing unphysical cumulative emissions.
 
+### Performance Optimizations
+
+The model includes several optimizations for computational efficiency while maintaining numerical accuracy:
+
+**1. Income-Dependent Climate Damage Iteration (economic_model.py)**
+
+Climate damage depends on effective per-capita income (y_eff), which itself depends on climate damage, creating a circular dependency. This is resolved iteratively:
+
+```python
+# Convergence criterion using LOOSE_EPSILON (1e-10)
+converged = np.abs(y_eff - y_eff_prev) < LOOSE_EPSILON
+```
+
+- **RELAXATION_FACTOR = 1.0**: No relaxation (direct substitution) provides fastest convergence
+- **Typical iterations**: 5-6 per timestep (down from ~45 with relaxation)
+- **Initial guess**: Analytical approximation using current state adapts better than using previous timestep
+- **Convergence tolerance**: LOOSE_EPSILON (1e-10) balances speed and precision
+
+**2. Hypergeometric Function Evaluation (climate_damage_distribution.py)**
+
+The analytical climate damage solution requires evaluating the Gauss hypergeometric function ₂F₁:
+
+```python
+from scipy.special import hyp2f1
+H1 = hyp2f1(1.0, a, a + 1.0, -b)  # Mean damage factor
+H2 = hyp2f1(1.0, 2.0 * a, 2.0 * a + 1.0, -b)  # Inequality adjustment
+```
+
+- **scipy.special.hyp2f1**: ~200x faster than arbitrary-precision libraries
+- **Accuracy**: Machine precision (~1e-16 relative error)
+- **Performance**: Evaluated twice per timestep per y_eff iteration
+
+**3. Numerical Constants (constants.py)**
+
+Two precision levels for different purposes:
+
+- **EPSILON = 1e-12**: Strict tolerance for mathematical comparisons (Gini bounds, float comparisons)
+- **LOOSE_EPSILON = 1e-10**: Practical tolerance for iterative solvers and optimization convergence
+  - Used for y_eff convergence in economic_model.py
+  - Default value for xtol_abs in optimization (control parameter convergence)
+  - Appropriate for variables in [0, 1] range
+
+**Cumulative Speedup:**
+
+Compared to initial implementation, these optimizations provide ~200x faster integration:
+- 400-year simulation: ~0.05 seconds (vs ~12 seconds originally)
+- Full optimization (10,000 evaluations): ~10 minutes (vs ~33 hours originally)
+
 ### Output Variables
 
 The results dictionary contains arrays for:
@@ -1040,9 +1297,9 @@ The results dictionary contains arrays for:
 - **State variables**: `K`, `Ecum`, `Gini`
 - **Time-dependent inputs**: `A`, `L`, `sigma`, `theta1`, `f`, `s`
 - **Economic variables**: `Y_gross`, `Y_damaged`, `Y_net`, `y`, `y_eff`
-- **Climate variables**: `delta_T`, `Omega`, `E`, `total_climate_damage`
-- **Abatement variables**: `mu`, `Lambda`, `abatecost`, `delta_c`, `abatement_cost_fraction`, `marginal_abatement_cost`
-- **Investment/consumption**: `gross_investment`, `consumption`
+- **Climate variables**: `delta_T`, `Omega`, `E`, `Climate_Damage`
+- **Abatement variables**: `mu`, `Lambda`, `AbateCost`, `redistribution`, `marginal_abatement_cost`
+- **Investment/Consumption**: `Savings`, `Consumption`
 - **Inequality/utility**: `G_eff`, `Gini_climate`, `U`, `discounted_utility`
 - **Tendencies**: `dK_dt`, `dEcum_dt`, `dGini_dt`, `Gini_step_change`
 
@@ -1101,32 +1358,7 @@ See the **Testing the Forward Model** section above for detailed instructions on
 
 ## Optimization Configuration
 
-The JSON configuration supports both direct multi-point optimization and iterative refinement optimization through the `optimization_parameters` section.
-
-### Direct Multi-Point Optimization
-
-Specify control times and initial guesses explicitly:
-
-```json
-"optimization_parameters": {
-  "max_evaluations": 10000,
-  "control_times": [0, 25, 50, 75, 100],
-  "initial_guess": [0.5, 0.5, 0.5, 0.5, 0.5]
-}
-```
-
-**Configuration rules:**
-- `control_times`: Array of times (years) where control points are placed
-  - Must be in ascending order
-  - For single-point optimization: `[0]`
-  - For multi-point: any number of times, e.g., `[0, 25, 50, 75, 100]`
-- `initial_guess`: Array of initial f values, one per control time
-  - Must have same length as `control_times`
-  - Each value must satisfy 0 ≤ f ≤ 1
-  - For single-point: `[0.5]` (or read from `control_function.value`)
-- `max_evaluations`: Maximum objective function evaluations per optimization
-  - Single-point: ~1000 typically sufficient
-  - Multi-point: scale with problem size (e.g., 10000 for 5 points)
+The JSON configuration uses iterative refinement optimization through the `optimization_parameters` section.
 
 ### Iterative Refinement Optimization
 
@@ -1135,22 +1367,30 @@ Specify the number of refinement iterations to progressively add control points:
 ```json
 "optimization_parameters": {
   "max_evaluations": 5000,
-  "control_times": 4,
-  "initial_guess": 0.5
+  "optimization_iterations": 4,
+  "initial_guess_f": 0.5,
+  "chebyshev_scaling_power": 1.5
 }
 ```
 
 **Configuration rules for iterative refinement:**
-- `control_times`: Scalar integer specifying number of refinement iterations
+- `optimization_iterations`: Integer specifying number of refinement iterations
   - Must be ≥ 1
-- `initial_guess`: Scalar value for initial f at all control points in first iteration
+- `initial_guess_f`: Scalar value for initial f at all control points in first iteration
   - Must satisfy 0 ≤ f ≤ 1
 - `max_evaluations`: Maximum objective function evaluations per iteration
-- `n_points_final`: Target number of control points in final iteration (optional)
-  - If specified, the refinement base is calculated as: `base = (n_points_final - 1)^(1/(n_iterations - 1))`
+- `chebyshev_scaling_power`: Power exponent for Chebyshev node transformation (optional, default 1.5)
+  - Controls concentration of control points in time
+  - Values > 1.0: concentrate points near t_start (early years)
+  - Values < 1.0: concentrate points near t_end (late years)
+  - Value = 1.0: standard transformed Chebyshev spacing
+  - Default 1.5 concentrates points early where discounting makes decisions most impactful
+  - Example: With t_end=400 and scaling_power=1.5, half the points occur before year 141
+- `n_points_final_f`: Target number of control points in final iteration (optional)
+  - If specified, the refinement base is calculated as: `base = (n_points_final_f - 1)^(1/(n_iterations - 1))`
   - If omitted, uses default `base = 2.0`
   - Non-integer bases prevent exact alignment with previous grids
-  - Example: `n_points_final = 10` with 4 iterations gives base ≈ 2.08 → 2, 3, 5, 10 points
+  - Example: `n_points_final_f = 10` with 4 iterations gives base ≈ 2.08 → 2, 3, 5, 10 points
   - Example: default base = 2.0 with 5 iterations gives 2, 3, 5, 9, 17 points
 - `xtol_abs`: Absolute tolerance on control parameters (optional, default from NLopt)
   - Recommended: `1e-10` (stops when all |Δf| < 1e-10)
@@ -1165,26 +1405,30 @@ Specify the number of refinement iterations to progressively add control points:
 
 The optimizer performs a sequence of optimizations with progressively finer control point grids. Each iteration uses the solution from the previous iteration to initialize the new optimization via PCHIP (Piecewise Cubic Hermite Interpolating Polynomial) interpolation.
 
-**Control point spacing - Utility-weighted distribution:**
+**Control point spacing - Chebyshev nodes:**
 
-Instead of spacing control points equally in time, points are distributed to provide approximately equal contributions to the time-discounted aggregate utility integral. This concentrates control points where they matter most for the objective function.
+Control points are distributed using a power-transformed Chebyshev node distribution. This provides flexible concentration of points toward early or late periods through a single tunable parameter (`chebyshev_scaling_power`). A minimum spacing constraint ensures control points are never closer together than the integration time step.
 
-The control point times are calculated based on:
-1. **Average TFP growth rate**: `k_A = ln(A(t_end)/A(t_start)) / (t_end - t_start)`
-2. **Effective consumption discount rate**: `r_c_effective = ρ + η · k_A · (1 - α)`
-   - `ρ`: pure rate of time preference
-   - `η`: coefficient of relative risk aversion
-   - `α`: capital share of income
-3. **Weighting discount rate**: `r_c = (r_c_effective + ρ) / 2`
-   - Uses the mean of the pure rate of time preference and the effective discount rate
-   - Provides a balance between pure time preference and consumption-adjusted discounting
-
-For iteration with N+1 control points (k = 0, 1, ..., N):
+For N control points (k = 0, 1, ..., N-1):
 ```
-t(k) = -(1/r_c) · ln(1 - (k/N) · (1 - exp(-r_c · t_end)))
+u[k] = (1 - cos(k * π / (N-1))) / 2    # Normalized to [0, 1]
+u_scaled[k] = u[k]^scaling_power       # Power transformation
+t[k] = t_start + (t_end - t_start) * u_scaled[k]
+
+# Enforce minimum spacing constraint
+t[k] = clip(t[k], t_start + k*dt, t_end - (N-1-k)*dt)
 ```
 
-This formula ensures that each interval between control points contributes approximately equally to the discounted objective, with more points concentrated in early periods where discounting matters most. The averaging of discount rates provides a pragmatic middle ground between pure time preference and growth-adjusted discounting.
+**Properties:**
+- `t[0] = t_start` and `t[N-1] = t_end` exactly (endpoints are fixed)
+- `scaling_power > 1.0`: concentrates points near t_start (early years)
+- `scaling_power < 1.0`: concentrates points near t_end (late years)
+- `scaling_power = 1.0`: standard transformed Chebyshev spacing
+- Default `scaling_power = 1.5` concentrates points early where discounting makes decisions most impactful
+- Minimum spacing: consecutive points are at least `dt` apart (integration time step)
+- Prevents numerical issues from control points too close together
+
+**Example:** With t_end=400 and scaling_power=1.5, half of the control points occur before year 141, providing more temporal resolution in the critical early period.
 
 **Iteration schedule:**
 
@@ -1206,7 +1450,7 @@ This formula ensures that each interval between control points contributes appro
 - Progressively captures finer temporal structure in optimal policy
 - Each iteration "warm starts" from previous solution
 - Avoids poor local minima that can occur with many control points from cold start
-- Utility-weighted spacing focuses computational effort where it matters most
+- Chebyshev-based spacing provides flexible control point concentration through `chebyshev_scaling_power`
 - PCHIP interpolation preserves monotonicity and shape characteristics of previous solution
 
 ### Optimization Stopping Criteria
@@ -1218,6 +1462,100 @@ The optimization accepts optional NLopt stopping criteria parameters:
 - `ftol_rel` - Relative tolerance on objective function
 
 **Recommended practice:** Use `xtol_abs = 1e-10` as the sole stopping criterion. Since the control variable f is bounded in [0,1], absolute tolerance is more meaningful than relative tolerance, and there's no reason to want different accuracy near 0 versus near 1. The objective function can have large absolute values, making `ftol_rel` trigger prematurely even when significant improvements remain possible.
+
+### Gradient-Based Optimization
+
+The optimizer supports both derivative-free and gradient-based algorithms. Gradient-based algorithms (LD_*) use numerical gradient computation via finite differences for improved convergence on smooth objectives.
+
+#### Algorithm Selection
+
+**Single algorithm for all iterations:**
+```json
+"algorithm": "LN_SBPLX"
+```
+
+**Per-iteration algorithm list (progressive refinement):**
+```json
+"optimization_iterations": 3,
+"algorithm": ["GN_ISRES", "LN_SBPLX", "LD_SLSQP"]
+```
+
+The algorithm list length must exactly match `optimization_iterations`. This enables progressive refinement strategies where early iterations explore broadly and later iterations refine with gradient information.
+
+#### Tested Algorithms
+
+The following algorithms have been tested with the COIN_equality model:
+
+**✅ Derivative-Free Algorithms (Recommended)**
+- **LN_SBPLX** - Primary recommendation, fast and robust
+- **LN_BOBYQA** - Good alternative
+- **LN_COBYLA** - Handles nonlinear constraints
+- **LN_NELDERMEAD** - Classic simplex method
+
+**✅ Gradient-Based Algorithms (Working)**
+- **LD_SLSQP** - Sequential Quadratic Programming, recommended for gradient-based optimization
+- **LD_MMA** - Method of Moving Asymptotes, robust alternative
+
+**❌ Known Issues**
+- **LD_LBFGS** - Runtime errors due to numerical instability with this problem structure. Use LD_SLSQP instead.
+
+**Untested**
+- **LD_CCSAQ**, **LD_VAR1**, **LD_VAR2** - May work but not yet tested
+- **GN_ISRES**, **GN_DIRECT_L** - Global optimizers, expect much longer runtime
+
+#### Algorithm Categories
+
+**LN_\* (Local, No derivatives):** LN_SBPLX, LN_BOBYQA, LN_COBYLA, LN_NELDERMEAD
+- Fast, robust for noisy objectives
+- No gradient computation overhead
+- Recommended for early iterations and general use
+- **Primary recommendation:** LN_SBPLX
+
+**LD_\* (Local, Derivative-based):** LD_SLSQP, LD_MMA
+- Uses numerical gradients via finite differences
+- Requires N+1 objective evaluations per gradient (N = number of parameters)
+- Better convergence for smooth objectives
+- Recommended for final polishing after derivative-free convergence
+- **Primary recommendation:** LD_SLSQP
+
+**GN_\* (Global, No derivatives):** GN_ISRES, GN_DIRECT_L
+- Explores parameter space broadly
+- Good for avoiding local minima
+- Slower convergence
+- Use only for first iteration when starting from poor initial guess
+
+#### Progressive Refinement Strategy
+
+Start with global exploration, refine locally, finish with gradient-based polishing:
+
+```json
+"optimization_iterations": 4,
+"algorithm": ["GN_ISRES", "LN_SBPLX", "LN_SBPLX", "LD_SLSQP"]
+```
+
+This strategy:
+1. **Iteration 1 (GN_ISRES):** Explores parameter space to avoid local minima
+2. **Iterations 2-3 (LN_SBPLX):** Refines solution with efficient derivative-free method
+3. **Iteration 4 (LD_SLSQP):** Polishes with gradient-based method for high precision
+
+#### Gradient Computation
+
+Gradient-based algorithms compute gradients numerically using forward finite differences:
+
+```
+∂f/∂x[i] ≈ (f(x + ε·e[i]) - f(x)) / ε
+```
+
+where ε = 1e-6 (LOOSER_EPSILON) and e[i] is the i-th unit vector.
+
+**Cost:** N+1 objective evaluations per gradient, where N is the total number of control parameters (n_f_points + n_s_points in dual mode).
+
+**When to use gradient-based algorithms:**
+- ✅ Final polishing after derivative-free convergence
+- ✅ Smooth, well-behaved objective functions
+- ✅ When high precision is needed
+- ❌ Early iterations (use GN_ISRES or LN_SBPLX instead)
+- ❌ Noisy or discontinuous objectives
 
 ### Dual Optimization (f and s)
 
@@ -1244,10 +1582,9 @@ The model supports simultaneous optimization of both the abatement allocation fr
   },
   "optimization_parameters": {
     "max_evaluations": 1000,
-    "control_times": [0],
-    "initial_guess": [0.5],
-    "s_control_times": [0],
-    "s_initial_guess": [0.24],
+    "optimization_iterations": 2,
+    "initial_guess_f": 0.5,
+    "initial_guess_s": 0.24,
     "algorithm": "LN_SBPLX",
     "xtol_abs": 1e-10
   }
@@ -1260,27 +1597,28 @@ The model supports simultaneous optimization of both the abatement allocation fr
 - When `s_control_function` is present, optimization will jointly optimize both f and s
 - Both variables use the same NLopt algorithm and stopping criteria
 
-#### Multi-Point Dual Optimization
+#### Dual Optimization with Different Temporal Resolution
 
-f(t) and s(t) can have **independent numbers of control points**:
+f(t) and s(t) can have **independent numbers of control points** through iterative refinement:
 
 ```json
 "optimization_parameters": {
   "max_evaluations": 10000,
-  "control_times": [0, 100, 200, 400],      // 4 points for f
-  "initial_guess": [0.5, 0.4, 0.5, 0.6],
-  "s_control_times": [0, 200, 400],         // 3 points for s
-  "s_initial_guess": [0.24, 0.26, 0.22],
+  "optimization_iterations": 4,
+  "initial_guess_f": 0.5,
+  "initial_guess_s": 0.24,
+  "n_points_final_f": 16,        // f gets 16 points in final iteration
+  "n_points_final_s": 8,         // s gets 8 points in final iteration
   "algorithm": "LN_SBPLX",
   "xtol_abs": 1e-10
 }
 ```
 
 **Key features:**
-- **Independent control times:** f and s can have different temporal resolution
-- **Independent initial guesses:** Different starting points for each variable
-- **Interpolation:** Both variables use PCHIP interpolation between control points
-- **Total dimension:** n_f + n_s (e.g., 4 + 3 = 7 dimensions in example above)
+- **Independent temporal resolution:** f and s can have different numbers of control points
+- **Independent refinement schedules:** Use `n_points_final_f` and `n_points_final_s` to control resolution
+- **Interpolation:** Both variables use PCHIP interpolation between control points during refinement
+- **Total dimension:** n_f + n_s (e.g., 16 + 8 = 24 dimensions in final iteration above)
 
 #### Backward Compatibility
 
@@ -1351,7 +1689,7 @@ The model now supports simultaneous optimization of both:
 1. **f(t)** - allocation fraction between abatement and redistribution
 2. **s(t)** - savings rate (fraction of net output invested)
 
-This capability allows the model to optimize the tradeoff between present consumption and future consumption (via savings/investment) while simultaneously optimizing the allocation of resources between climate mitigation and inequality reduction.
+This capability allows the model to optimize the tradeoff between present Consumption and future Consumption (via savings/investment) while simultaneously optimizing the allocation of resources between climate mitigation and inequality reduction.
 
 **Implementation Status:** ✅ Infrastructure complete (Phases 1-5 done)
 - Dual control functions operational
@@ -1456,8 +1794,8 @@ The implementation will parallel the existing optimization structure for f(t), c
    - Clean precedence: s_control_function > time_functions['s']
 
 2. **Extended OptimizationParameters dataclass** ✅
-   - Added `s_control_times`: int or list, parallel to `control_times` for f
-   - Added `s_initial_guess`: float or list, parallel to `initial_guess` for f
+   - Dual optimization uses same `optimization_iterations` for both f and s
+   - Added `initial_guess_s`: float, parallel to `initial_guess_f` for f
    - Added `s_n_points_final`: int, for iterative refinement of s
    - Added `is_dual_optimization()` method to check if optimizing both f and s
    - All fields optional with None default (backward compatible)
@@ -1552,7 +1890,7 @@ The implementation will parallel the existing optimization structure for f(t), c
 ### Expected Benefits
 
 - **More realistic optimization**: Savings rate is a key economic policy variable that should be optimized alongside other controls
-- **Richer dynamics**: Time-varying s(t) allows model to balance present vs. future consumption optimally
+- **Richer dynamics**: Time-varying s(t) allows model to balance present vs. future Consumption optimally
 - **Methodological advancement**: Demonstrates framework extensibility to multi-dimensional control problems
 
 ## Project Structure
@@ -1565,8 +1903,14 @@ coin_equality/
 ├── income_distribution.py             # Core income distribution functions
 ├── economic_model.py                  # Economic production and tendency calculations
 ├── parameters.py                      # Parameter definitions and configuration loading
+├── optimization.py                    # Optimization framework with iterative refinement
 ├── output.py                          # Output generation (CSV and PDF)
-├── test_integration.py                # Test script demonstrating complete workflow
+├── test_integration.py                # Test script for forward integration
+├── run_optimization.py                # Main script for running optimizations
+├── run_parallel.py                    # Launch multiple optimizations in parallel
+├── compare_results.py                 # Compare multiple optimization runs
+├── comparison_utils.py                # Utilities for multi-run comparison
+├── visualization_utils.py             # Unified visualization functions
 ├── config_baseline.json               # Baseline scenario configuration
 ├── config_high_inequality.json        # High inequality scenario configuration
 ├── data/output/                       # Output directory (timestamped subdirectories)

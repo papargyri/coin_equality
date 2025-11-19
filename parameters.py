@@ -15,6 +15,7 @@ and the run name (used for output directory naming).
 import json
 import numpy as np
 from dataclasses import dataclass
+from constants import LOOSE_EPSILON
 
 
 # =============================================================================
@@ -378,40 +379,44 @@ class OptimizationParameters:
     """
     Parameters controlling optimization.
 
-    Supports two modes:
-    1. Direct multi-point optimization (control_times is list, initial_guess_f is list)
-    2. Iterative refinement optimization (control_times is int, initial_guess_f is float)
+    Uses iterative refinement optimization with progressively refined control grids.
 
     Supports dual optimization when initial_guess_s is specified.
 
     Attributes
     ----------
     max_evaluations : int
-        Maximum number of objective function evaluations (per iteration for iterative mode)
-    control_times : list of float OR int
-        Direct mode (list): Times (years) where control points are placed.
-            For single-point: [0]
-            For multi-point: e.g., [0, 25, 50, 75, 100]
-        Iterative refinement mode (int): Number of refinement iterations.
-            Iteration 1: 2 control points (t_start, t_end)
-            Iteration 2: 3 control points
-            Iteration k: 2^k + 1 control points
-        Note: Both f and s use the same control_times in dual optimization mode.
-    initial_guess_f : list of float OR float
-        Direct mode (list): Initial f values at each control time.
-            Must have same length as control_times.
-            Each value must satisfy 0 ≤ f ≤ 1.
-        Iterative refinement mode (float): Single initial f value for first iteration.
-            Must satisfy 0 ≤ f ≤ 1.
-    algorithm : str, optional
+        Maximum number of objective function evaluations per iteration
+    optimization_iterations : int
+        Number of refinement iterations.
+        Iteration 1: n_points_initial control points at t_start and t_end
+        Iteration k: progressively more control points based on refinement_base
+        Example: With n_points_initial=2 and refinement_base=2.0:
+            Iteration 1: 2 points, Iteration 2: 3 points, Iteration 3: 5 points, etc.
+        Note: Both f and s use the same number of optimization_iterations in dual optimization mode.
+    initial_guess_f : float
+        Initial f value for all control points in first iteration.
+        Must satisfy 0 ≤ f ≤ 1.
+    algorithm : str or list of str, optional
         NLopt algorithm to use. If None, defaults to 'LN_SBPLX'.
-        Options include:
-        - 'LN_SBPLX': Local derivative-free Subplex (default, robust for noisy objectives)
-        - 'LN_BOBYQA': Local derivative-free (good for smooth problems)
-        - 'GN_ISRES': Global stochastic (good for multi-modal problems)
-        - 'GN_DIRECT_L': Global deterministic (good for Lipschitz-continuous)
-        - 'LN_COBYLA': Local derivative-free (handles nonlinear constraints)
-        - 'LN_NELDERMEAD': Local derivative-free (Nelder-Mead simplex)
+
+        Can be specified as:
+        - Single string: same algorithm for all iterations (e.g., 'LN_SBPLX')
+        - List of strings: different algorithm per iteration, length must equal optimization_iterations
+          Example: ["GN_ISRES", "LN_SBPLX", "LD_SLSQP"] for progressive refinement
+
+        Algorithm categories:
+        - 'LN_*': Local, derivative-free (LN_SBPLX, LN_BOBYQA, LN_COBYLA, LN_NELDERMEAD)
+          Fast, robust for noisy objectives. No gradient computation overhead.
+        - 'LD_*': Local, derivative-based (LD_SLSQP, LD_MMA, LD_LBFGS, LD_CCSAQ)
+          Uses numerical gradients (N+1 evaluations per gradient). Better convergence for smooth objectives.
+          Recommended for final polishing after derivative-free convergence.
+        - 'GN_*': Global, derivative-free (GN_ISRES, GN_DIRECT_L)
+          Explores parameter space broadly. Good for avoiding local minima.
+
+        Progressive refinement strategy:
+        ["GN_ISRES", "LN_SBPLX", "LD_SLSQP"] = global exploration → local refinement → gradient polish
+
         See NLopt documentation for full list.
     ftol_rel : float, optional
         Relative tolerance on objective function changes.
@@ -428,44 +433,70 @@ class OptimizationParameters:
     xtol_abs : float, optional
         Absolute tolerance on parameter changes.
         Stops when |Δx| < xtol_abs for all parameters.
+        Default: LOOSE_EPSILON (1e-10), which is appropriate for control parameters in [0,1].
         If None, uses NLopt default (0.0 = disabled).
     n_points_final_f : int, optional
         Target number of f control points in final iteration (only used in iterative mode).
-        If specified, refinement_base is calculated as: (n_points_final_f - 1)^(1/(n_iterations - 1))
+        If specified, refinement_base is calculated as: ((n_points_final_f - 1) / (n_points_initial_f - 1))^(1/(n_iterations - 1))
         If None, uses refinement_base = 2.0 (default behavior: 2, 3, 5, 9, 17, ...)
         Example: n_points_final_f=17 with 5 iterations gives base ≈ 2.0
         Example: n_points_final_f=10 with 4 iterations gives base ≈ 2.08
-    initial_guess_s : list of float OR float, optional
+    n_points_initial_f : int, optional
+        Number of f control points in first iteration (only used in iterative mode).
+        Default: 2
+        Used with n_points_final_f to determine refinement_base.
+        Example: n_points_initial_f=3, n_points_final_f=10, n_iterations=4 gives base ≈ 1.65
+    initial_guess_s : float, optional
         Enables dual optimization of both f and s when present.
-        Direct mode (list): Initial s values at each control time.
-            Must have same length as control_times.
-            Each value must satisfy 0 ≤ s ≤ 1.
-        Iterative refinement mode (float): Single initial s value for first iteration.
-            Must satisfy 0 ≤ s ≤ 1.
+        Initial s value for all control points in first iteration.
+        Must satisfy 0 ≤ s ≤ 1.
     n_points_final_s : int, optional
         Target number of s control points in final iteration (iterative mode only).
-        If None, uses same refinement base as f (derived from n_points_final_f).
+        If None, uses same refinement base as f (derived from n_points_final_f and n_points_initial_f).
         Can differ from n_points_final_f to allow different temporal resolution for s.
+    n_points_initial_s : int, optional
+        Number of s control points in first iteration (only used in iterative mode).
+        Default: 2
+        Used with n_points_final_s to determine refinement_base for s.
     bounds_f : list of [float, float], optional
         Bounds for f values as [min, max]. Default: [0.0, 1.0]
         Example: [0.0, 0.8] to limit maximum abatement allocation to 80%
     bounds_s : list of [float, float], optional
         Bounds for s values as [min, max]. Default: [0.0, 1.0]
         Example: [0.2, 0.3] to constrain savings rate between 20% and 30%
+    optimize_time_points : bool, optional
+        Enable time adjustment optimization phase after standard iterations.
+        When True, adjusts temporal spacing of control points while keeping values fixed.
+        This allows optimizer to concentrate control points where changes matter most.
+        Only applies to iterative refinement mode. Default: False (disabled)
+    chebyshev_scaling_power : float, optional
+        Power exponent for Chebyshev node transformation (must be > 0).
+        Controls the concentration of control points in time.
+        - Values > 1.0: concentrate points near t_start (early concentration)
+        - Values < 1.0: concentrate points near t_end (late concentration)
+        - Value = 1.0: standard transformed Chebyshev spacing
+        Default: 1.5 (concentrates points in early period where discounting
+        makes decisions most impactful)
+        Example: With t_end=400 and scaling_power=1.5, half the points
+        occur before year 141.
     """
     max_evaluations: int
-    control_times: object  # list or int
+    optimization_iterations: int
     initial_guess_f: object  # list or float
-    algorithm: str = None
+    algorithm: object = None  # str or list[str]
     ftol_rel: float = None
     ftol_abs: float = None
     xtol_rel: float = None
-    xtol_abs: float = None
+    xtol_abs: float = LOOSE_EPSILON
     n_points_final_f: int = None
+    n_points_initial_f: int = 2
     initial_guess_s: object = None  # list or float, enables dual optimization if present
     n_points_final_s: int = None
+    n_points_initial_s: int = 2
     bounds_f: list = None  # [min, max] for f, defaults to [0.0, 1.0]
     bounds_s: list = None  # [min, max] for s, defaults to [0.0, 1.0]
+    optimize_time_points: bool = False
+    chebyshev_scaling_power: float = 1.5
 
     def is_iterative_refinement(self):
         """
@@ -474,10 +505,9 @@ class OptimizationParameters:
         Returns
         -------
         bool
-            True if iterative refinement mode (control_times is int),
-            False if direct mode (control_times is list)
+            Always returns True (direct mode has been removed)
         """
-        return isinstance(self.control_times, int)
+        return isinstance(self.optimization_iterations, int)
 
     def is_dual_optimization(self):
         """
@@ -491,17 +521,44 @@ class OptimizationParameters:
         """
         return self.initial_guess_s is not None
 
-    def is_direct_mode(self):
+    def get_algorithm_for_iteration(self, iteration):
         """
-        Check if this configuration uses direct multi-point mode.
+        Get the algorithm to use for a specific iteration.
+
+        Parameters
+        ----------
+        iteration : int
+            Iteration number (1-based)
 
         Returns
         -------
-        bool
-            True if direct mode (control_times is list),
-            False if iterative refinement mode (control_times is int)
+        str
+            Algorithm name for this iteration
+
+        Notes
+        -----
+        If algorithm is a string, returns that algorithm for all iterations.
+        If algorithm is a list, returns the algorithm for the specified iteration.
+        If algorithm is None, returns 'LN_SBPLX' (default).
+
+        List length must match optimization_iterations (fail-fast validation).
         """
-        return isinstance(self.control_times, (list, np.ndarray))
+        if self.algorithm is None:
+            return 'LN_SBPLX'
+        elif isinstance(self.algorithm, str):
+            return self.algorithm
+        elif isinstance(self.algorithm, list):
+            if len(self.algorithm) != self.optimization_iterations:
+                raise ValueError(
+                    f"Algorithm list length ({len(self.algorithm)}) must match "
+                    f"optimization_iterations ({self.optimization_iterations})"
+                )
+            return self.algorithm[iteration - 1]
+        else:
+            raise ValueError(
+                f"Invalid algorithm type: {type(self.algorithm).__name__}. "
+                f"Must be str, list, or None."
+            )
 
 
 @dataclass
@@ -805,6 +862,7 @@ def load_configuration(config_path):
         # Use initial_guess_s as default constant s function
         initial_s = optimization_params.initial_guess_s if optimization_params.initial_guess_s is not None else 0.24
         s_time_function = lambda t: initial_s if isinstance(initial_s, float) else initial_s[0]
+        time_functions['s'] = s_time_function
 
     control_function = create_f_and_s_control_from_single(f_control, s_time_function)
 

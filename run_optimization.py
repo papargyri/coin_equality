@@ -15,11 +15,33 @@ import json
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
+from io import StringIO
 from matplotlib.backends.backend_pdf import PdfPages
 from parameters import load_configuration, ModelConfiguration
 from optimization import UtilityOptimizer, create_control_function_from_points
 from economic_model import integrate_model
-from output import save_results, write_optimization_summary, copy_config_file
+from output import save_results, write_optimization_summary, copy_config_file, create_output_directory
+
+
+class TeeOutput:
+    """Write output to both console and file (like Unix tee command)."""
+
+    def __init__(self, file_path, original_stream):
+        self.file = open(file_path, 'w')
+        self.original_stream = original_stream
+
+    def write(self, data):
+        self.original_stream.write(data)
+        self.file.write(data)
+        self.file.flush()
+
+    def flush(self):
+        self.original_stream.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
 
 def apply_config_override(config_dict, key_path, value):
@@ -116,6 +138,8 @@ Common overrides:
   --optimization_parameters.max_evaluations <value>
   --optimization_parameters.n_points_final_f <value>
   --optimization_parameters.n_points_final_s <value>
+  --optimization_parameters.n_points_initial_f <value>
+  --optimization_parameters.n_points_initial_s <value>
   --time_functions.A.growth_rate <value>
         """
     )
@@ -399,6 +423,13 @@ def main():
     """Main execution function."""
     start_time = time.time()
 
+    # Capture output to buffer initially (until output directory is created)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    output_buffer = StringIO()
+    sys.stdout = output_buffer
+    sys.stderr = output_buffer
+
     # Parse command line arguments
     config_path, overrides = parse_arguments()
 
@@ -426,10 +457,25 @@ def main():
         os.unlink(tmp_path)
     opt_params = config.optimization_params
 
+    # Create output directory immediately and start logging to file
+    output_dir = create_output_directory(config.run_name)
+    terminal_output_path = Path(output_dir) / 'terminal_output.txt'
+
+    # Write buffered output to file and switch to tee mode
+    buffered_output = output_buffer.getvalue()
+    sys.stdout = original_stdout
+    sys.stderr = original_stderr
+    tee_stdout = TeeOutput(terminal_output_path, original_stdout)
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stdout
+
+    # Display buffered output
+    print(buffered_output, end='')
+
     is_iterative = opt_params.is_iterative_refinement()
 
     if is_iterative:
-        n_iterations = opt_params.control_times
+        n_iterations = opt_params.optimization_iterations
         print_header(f"ITERATIVE REFINEMENT OPTIMIZATION ({n_iterations} ITERATIONS)")
         print(f"Configuration file: {config_path}")
         print(f"Run name: {config.run_name}")
@@ -437,48 +483,29 @@ def main():
         print(f"Time step: {config.integration_params.dt} years")
         print(f"\nIterative refinement mode:")
         print(f"  Number of iterations: {n_iterations}")
+        print(f"  Initial f control points: {opt_params.n_points_initial_f}")
         if opt_params.n_points_final_f is not None:
             print(f"  Final f control points: {opt_params.n_points_final_f}")
         else:
-            print(f"  Final f control points: {round(1 + 2.0**(n_iterations - 1))}")
+            print(f"  Final f control points: {round(1 + (opt_params.n_points_initial_f - 1) * 2.0**(n_iterations - 1))}")
         print(f"  Initial guess: f = {opt_params.initial_guess_f}")
         if opt_params.initial_guess_s is not None:
             print(f"  Initial guess: s = {opt_params.initial_guess_s}")
+            print(f"  Initial s control points: {opt_params.n_points_initial_s}")
             if opt_params.n_points_final_s is not None:
                 print(f"  Final s control points: {opt_params.n_points_final_s}")
             else:
                 print(f"  Final s control points: same as f")
             print(f"  Optimizing both f and s: YES")
-    else:
-        control_times = opt_params.control_times
-        n_control_points = len(control_times)
-        print_header(f"DIRECT OPTIMIZATION ({n_control_points} CONTROL POINTS)")
-        print(f"Configuration file: {config_path}")
-        print(f"Run name: {config.run_name}")
-        print(f"Time span: {config.integration_params.t_start} to {config.integration_params.t_end} years")
-        print(f"Time step: {config.integration_params.dt} years")
 
     optimizer = UtilityOptimizer(config)
 
     initial_guess = opt_params.initial_guess_f
     max_evaluations = opt_params.max_evaluations
-
-    if is_iterative:
-        sensitivity_results = None
-    elif len(opt_params.control_times) == 1:
-        print(f"\n==> Running SINGLE control point optimization")
-        print(f"    Control time: {opt_params.control_times[0]}")
-        print(f"    Initial guess: f = {initial_guess[0]}")
-        sensitivity_results = run_sensitivity_analysis(optimizer, n_points=21)
-    else:
-        print(f"\n==> Running MULTI-POINT control optimization")
-        print(f"    Number of control points: {len(opt_params.control_times)}")
-        print(f"    Control times: {opt_params.control_times}")
-        print(f"    Initial guess: {initial_guess}")
-        sensitivity_results = None
+    sensitivity_results = None
 
     print_header("OPTIMIZATION")
-    print(f"Max evaluations: {max_evaluations}{' per iteration' if is_iterative else ''}")
+    print(f"Max evaluations: {max_evaluations} per iteration")
 
     algorithm = opt_params.algorithm if opt_params.algorithm is not None else 'LN_SBPLX'
     print(f"Algorithm: {algorithm}")
@@ -494,59 +521,33 @@ def main():
 
     print(f"\nRunning {algorithm} optimization...\n")
 
-    if is_iterative:
-        opt_results = optimizer.optimize_with_iterative_refinement(
-            n_iterations=opt_params.control_times,
-            initial_guess_scalar=opt_params.initial_guess_f,
-            max_evaluations=max_evaluations,
-            algorithm=opt_params.algorithm,
-            ftol_rel=opt_params.ftol_rel,
-            ftol_abs=opt_params.ftol_abs,
-            xtol_rel=opt_params.xtol_rel,
-            xtol_abs=opt_params.xtol_abs,
-            n_points_final=opt_params.n_points_final_f,
-            initial_guess_s_scalar=opt_params.initial_guess_s,
-            n_points_final_s=opt_params.n_points_final_s
-        )
-        n_final_control_points = len(opt_results['control_points'])
-    else:
-        opt_results = optimizer.optimize_control_points(
-            opt_params.control_times,
-            initial_guess,
-            max_evaluations,
-            algorithm=opt_params.algorithm,
-            ftol_rel=opt_params.ftol_rel,
-            ftol_abs=opt_params.ftol_abs,
-            xtol_rel=opt_params.xtol_rel,
-            xtol_abs=opt_params.xtol_abs
-        )
-        n_final_control_points = len(opt_params.control_times)
+    opt_results = optimizer.optimize_with_iterative_refinement(
+        n_iterations=opt_params.optimization_iterations,
+        initial_guess_scalar=opt_params.initial_guess_f,
+        max_evaluations=max_evaluations,
+        algorithm=opt_params.algorithm,
+        ftol_rel=opt_params.ftol_rel,
+        ftol_abs=opt_params.ftol_abs,
+        xtol_rel=opt_params.xtol_rel,
+        xtol_abs=opt_params.xtol_abs,
+        n_points_final=opt_params.n_points_final_f,
+        n_points_initial=opt_params.n_points_initial_f,
+        initial_guess_s_scalar=opt_params.initial_guess_s,
+        n_points_final_s=opt_params.n_points_final_s,
+        n_points_initial_s=opt_params.n_points_initial_s,
+        optimize_time_points=opt_params.optimize_time_points
+    )
+    n_final_control_points = len(opt_results['control_points'])
 
     if opt_results.get('status') == 'degenerate':
         print(f"\n*** DEGENERATE CASE DETECTED ***")
         print(f"No income available for redistribution or abatement (fract_gdp = 0)")
         print(f"Control values have no effect on outcome.")
         print(f"Returning initial guess values.\n")
-    elif not is_iterative and 'termination_name' in opt_results:
-        print(f"Termination: {opt_results['termination_name']} (code {opt_results['termination_code']})\n")
 
     print_optimization_results(opt_results, n_final_control_points)
 
-    if not is_iterative and len(opt_params.control_times) == 1:
-        f_opt = opt_results['optimal_values'][0]
-        comparison_scenarios = {
-            'Optimal': f_opt,
-            'All redistribution (f=0)': 0.0,
-            'Balanced (f=0.5)': 0.5,
-            'All abatement (f=1)': 1.0,
-        }
-        comparison_results = compare_scenarios(
-            config,
-            list(comparison_scenarios.values()),
-            list(comparison_scenarios.keys())
-        )
-    else:
-        comparison_results = None
+    comparison_results = None
 
     print_header("SAVING RESULTS")
 
@@ -585,19 +586,30 @@ def main():
 
     print("\nSaving integration results (CSV and PDF)...")
     plot_short_horizon = config.integration_params.plot_short_horizon
-    output_paths = save_results(optimal_results, optimal_config.run_name, plot_short_horizon)
+    # Pass the pre-created output_dir to save_results
+    output_paths = save_results(optimal_results, optimal_config.run_name, plot_short_horizon, output_dir)
+
     print(f"  Output directory: {output_paths['output_dir']}")
     print(f"  Results CSV:      {output_paths['csv_file']}")
     print(f"  Results PDF:      {output_paths['pdf_file']}")
     if 'pdf_file_short' in output_paths:
         print(f"  Short-term PDF:   {output_paths['pdf_file_short']}")
 
+    # Create comprehensive results visualization using unified plotting
+    print("\nCreating comprehensive results visualization...")
+    from visualization_utils import create_results_report_pdf
+    import pandas as pd
+    results_df = pd.read_csv(output_paths['csv_file'])
+    comprehensive_pdf = Path(output_dir) / 'plots_full.pdf'
+    create_results_report_pdf({config.run_name: results_df}, comprehensive_pdf)
+    print(f"  Comprehensive PDF: {comprehensive_pdf}")
+
     print("\nWriting optimization summary CSV...")
-    opt_csv_path = write_optimization_summary(opt_results, sensitivity_results, output_paths['output_dir'], 'optimization_summary.csv')
+    opt_csv_path = write_optimization_summary(opt_results, sensitivity_results, output_dir, 'optimization_summary.csv')
     print(f"  Optimization CSV: {opt_csv_path}")
 
     print("\nCopying configuration file...")
-    config_copy_path = copy_config_file(config_path, output_paths['output_dir'])
+    config_copy_path = copy_config_file(config_path, output_dir)
     print(f"  Configuration:    {config_copy_path}")
 
     if comparison_results:
@@ -607,54 +619,38 @@ def main():
         print(f"  Comparison PDF:   {output_pdf}")
 
     print_header("SUMMARY")
-    if is_iterative:
-        print(f"Iterative refinement optimization complete:")
-        print(f"  Iterations performed: {opt_results['n_iterations']}")
-        print(f"  Total evaluations: {opt_results['n_evaluations']}")
-        print(f"  Final control points: {n_final_control_points}")
-        print(f"\nOptimal objective value: {opt_results['optimal_objective']:.6e}")
-        print(f"\nIteration history:")
-        for iter_result in opt_results['iteration_history']:
-            print(f"  Iteration {iter_result['iteration']:2d}: {iter_result['n_control_points']:3d} points, "
-                  f"objective = {iter_result['optimal_objective']:.6e}, "
-                  f"evals = {iter_result['n_evaluations']}")
-        print(f"\nFinal control trajectory (f - abatement fraction):")
-        for t, f_val in opt_results['control_points']:
-            print(f"  t={t:6.1f} yr: f={f_val:.6f}")
+    print(f"Iterative refinement optimization complete:")
+    print(f"  Iterations performed: {opt_results['n_iterations']}")
+    print(f"  Total evaluations: {opt_results['n_evaluations']}")
+    print(f"  Final control points: {n_final_control_points}")
+    print(f"\nOptimal objective value: {opt_results['optimal_objective']:.6e}")
+    print(f"\nIteration history:")
+    for iter_result in opt_results['iteration_history']:
+        print(f"  Iteration {iter_result['iteration']:2d}: {iter_result['n_control_points']:3d} points, "
+              f"objective = {iter_result['optimal_objective']:.6e}, "
+              f"evals = {iter_result['n_evaluations']}")
+    print(f"\nFinal control trajectory (f - abatement fraction):")
+    for t, f_val in opt_results['control_points']:
+        print(f"  t={t:6.1f} yr: f={f_val:.6f}")
 
-        if 's_control_points' in opt_results:
-            print(f"\nFinal control trajectory (s - savings rate):")
-            for t, s_val in opt_results['s_control_points']:
-                print(f"  t={t:6.1f} yr: s={s_val:.6f}")
-    elif not is_iterative and len(opt_params.control_times) == 1:
-        print(f"Optimal constant allocation: f₀ = {opt_results['optimal_values'][0]:.6f}")
-        print(f"Optimal objective value: {opt_results['optimal_objective']:.6e}")
-        print(f"\nComparison with other strategies:")
-        for label, data in comparison_results.items():
-            obj_diff = data['objective'] - opt_results['optimal_objective']
-            pct_diff = 100 * obj_diff / abs(opt_results['optimal_objective'])
-            if label == 'Optimal':
-                print(f"  {label:30s}: objective = {data['objective']:.6e} (optimal)")
-            else:
-                print(f"  {label:30s}: objective = {data['objective']:.6e} ({pct_diff:+.2f}% from optimal)")
-    else:
-        print(f"Optimal control trajectory (f - abatement fraction):")
-        for t, f_val in opt_results['control_points']:
-            print(f"  t={t:6.1f} yr: f={f_val:.6f}")
+    if 's_control_points' in opt_results:
+        print(f"\nFinal control trajectory (s - savings rate):")
+        for t, s_val in opt_results['s_control_points']:
+            print(f"  t={t:6.1f} yr: s={s_val:.6f}")
 
-        if 's_control_points' in opt_results:
-            print(f"\nOptimal control trajectory (s - savings rate):")
-            for t, s_val in opt_results['s_control_points']:
-                print(f"  t={t:6.1f} yr: s={s_val:.6f}")
-
-        print(f"\nOptimal objective value: {opt_results['optimal_objective']:.6e}")
-
-    print(f"\nAll results saved to: {output_paths['output_dir']}")
+    print(f"\nAll results saved to: {output_dir}")
 
     elapsed_time = time.time() - start_time
     print(f"\nTotal runtime: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
 
     print_header("OPTIMIZATION TEST COMPLETE")
+
+    # Close output file and restore original stdout/stderr
+    if isinstance(sys.stdout, TeeOutput):
+        sys.stdout.close()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        print(f"\nTerminal output saved to: {terminal_output_path}")
 
 
 if __name__ == '__main__':
