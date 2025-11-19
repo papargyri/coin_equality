@@ -175,7 +175,7 @@ def calculate_tendencies(state, params, store_detailed_output=True):
                     mean_log_income = (
                         np.log(y_eff)
                         + np.log((a - 1.0) / a)
-                        - 1.0 / (a - 1.0)
+                        + 1.0 / (a - 1.0)
                     )
                     U = mean_log_income
 
@@ -333,7 +333,7 @@ def calculate_tendencies(state, params, store_detailed_output=True):
                     mean_log_income = (
                         np.log(y_eff)
                         + np.log((a - 1.0) / a)
-                        - 1.0 / (a - 1.0)
+                        + 1.0 / (a - 1.0)
                     )
                     U = mean_log_income
                 else:
