@@ -6,7 +6,7 @@ and emissions abatement costs.
 """
 
 import numpy as np
-from income_distribution import calculate_Gini_effective_redistribute_abate
+from income_distribution import calculate_Gini_effective_redistribute_abate, a_from_G
 from parameters import evaluate_params_at_time
 from climate_damage_distribution import calculate_climate_damage_and_gini_effect
 from constants import EPSILON, LOOSE_EPSILON, NEG_BIGNUM, MAX_INITIAL_CAPITAL_ITERATIONS
@@ -153,15 +153,40 @@ def calculate_tendencies(state, params, store_detailed_output=True):
             mu = min(mu_max, (AbateCost * theta2 / (Epot * theta1)) ** (1 / theta2))
         else:
             mu = 0.0
+        
+        # Eq 3.5: Mean utility for Pareto income distribution with Gini G
+        # Handles G = 0, G > 0, eta = 1, eta != 1
 
-        # Eq 3.5: Mean utility (simplified for Gini = 0)
-        if y_eff > 0:
-            if np.abs(eta - 1.0) < EPSILON:
-                U = np.log(y_eff)
+        if y_eff > 0 and 0 <= G_eff < 1.0:
+
+            # Perfect equality: everyone earns y_eff
+            if G_eff == 0.0:
+                if np.abs(eta - 1.0) < EPSILON:
+                    U = np.log(y_eff)
+                else:
+                    U = (y_eff ** (1.0 - eta)) / (1.0 - eta)
+
+            # Inequality: Pareto distribution with shape a(G)
             else:
-                U = (y_eff ** (1 - eta)) / (1 - eta)
+                a = a_from_G(G_eff)  # your function: (1 + 1/G)/2
+
+                if np.abs(eta - 1.0) < EPSILON:
+                    # Mean log income for Pareto(a) with mean y_eff
+                    mean_log_income = (
+                        np.log(y_eff)
+                        + np.log((a - 1.0) / a)
+                        - 1.0 / (a - 1.0)
+                    )
+                    U = mean_log_income
+
+                else:
+                    # Correct CRRA mean utility for Pareto(a)
+                    C = (a / (a + eta - 1.0)) * ((a - 1.0) / a) ** (1.0 - eta)
+                    U = C * (y_eff ** (1.0 - eta)) / (1.0 - eta)
+
         else:
             U = NEG_BIGNUM
+
 
         # Eq 2.3: Actual emissions (after abatement)
         E = sigma * (1 - mu) * Y_gross
@@ -284,18 +309,6 @@ def calculate_tendencies(state, params, store_detailed_output=True):
         else:
             mu = 0.0
 
-        # Eq 3.5: Mean utility
-        if y_eff > 0 and 0 <= G_eff <= 1.0:
-            if np.abs(eta - 1.0) < EPSILON:
-                U = np.log(y_eff) + np.log((1 - G_eff) / (1 + G_eff)) + 2 * G_eff / (1 + G_eff)
-            else:
-                term1 = (y_eff ** (1 - eta)) / (1 - eta)
-                numerator = ((1 + G_eff) ** eta) * ((1 - G_eff) ** (1 - eta))
-                denominator = 1 + G_eff * (2 * eta - 1)
-                term2 = (numerator / denominator) ** (1 / (1 - eta))
-                U = term1 * term2
-        else:
-            U = NEG_BIGNUM
 
         # Eq 2.3: Actual emissions (after abatement)
         E = sigma * (1 - mu) * Y_gross
