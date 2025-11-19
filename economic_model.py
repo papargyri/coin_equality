@@ -320,6 +320,28 @@ def calculate_tendencies(state, params, store_detailed_output=True):
         dGini_dt = -Gini_restore * (Gini - Gini_initial)
         Gini_step_change = Gini_fract * (G_eff - Gini)
 
+        # Eq 3.5: Mean utility for Pareto income distribution with Gini G
+        if y_eff > 0 and 0 <= G_eff < 1.0:
+            if G_eff == 0.0:
+                if np.abs(eta - 1.0) < EPSILON:
+                    U = np.log(y_eff)
+                else:
+                    U = (y_eff ** (1.0 - eta)) / (1.0 - eta)
+            else:
+                a = a_from_G(G_eff)
+                if np.abs(eta - 1.0) < EPSILON:
+                    mean_log_income = (
+                        np.log(y_eff)
+                        + np.log((a - 1.0) / a)
+                        - 1.0 / (a - 1.0)
+                    )
+                    U = mean_log_income
+                else:
+                    C = (a / (a + eta - 1.0)) * ((a - 1.0) / a) ** (1.0 - eta)
+                    U = C * (y_eff ** (1.0 - eta)) / (1.0 - eta)
+        else:
+            U = NEG_BIGNUM
+
     else:
         Omega = 0.0
         Gini_climate = Gini
